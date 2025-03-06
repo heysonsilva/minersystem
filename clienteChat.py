@@ -3,8 +3,8 @@ import hashlib
 import time
 
 # Configurações do servidor
-HOST = '127.0.0.1'
-PORT = 31471
+HOST = '127.0.0.1'  # Endereço do servidor
+PORT = 31471        # Porta do servidor
 
 # Nome do cliente (deve ter até 10 bytes)
 CLIENT_NAME = "Cliente1"
@@ -58,21 +58,39 @@ def start_client():
                 window_end = window_start + window_size
 
                 # Tentar encontrar o nonce
-                nonce = mine_transaction(transaction, zero_bits, window_start, window_end)
-                if nonce is not None:
-                    # Nonce encontrado, notificar o servidor
-                    notification = f"S {num_transacao} {nonce}"
-                    client.send(notification.encode('utf-8'))
-                    print(f"Nonce encontrado: {nonce}")
+                while True:
+                    nonce = mine_transaction(transaction, zero_bits, window_start, window_end)
+                    if nonce is not None:
+                        # Nonce encontrado, notificar o servidor
+                        notification = f"S {num_transacao} {nonce}"
+                        client.send(notification.encode('utf-8'))
+                        print(f"Nonce encontrado: {nonce}")
 
-                    # Aguardar resposta do servidor (V ou R)
-                    validation_response = client.recv(1024).decode('utf-8').strip()
-                    print(f"Resposta do servidor: {validation_response}")
+                        # Aguardar resposta do servidor (V ou R)
+                        validation_response = client.recv(1024).decode('utf-8').strip()
+                        print(f"Resposta do servidor: {validation_response}")
+
+                        if validation_response.startswith("V"):
+                            # Nonce válido, sair do loop e solicitar nova transação
+                            break
+                        elif validation_response.startswith("R"):
+                            # Nonce inválido, continuar minerando na mesma transação
+                            print("Nonce inválido. Continuando a mineração...")
+                            continue
+                    else:
+                        # Não encontrou um nonce válido, solicitar nova transação
+                        print("Nenhum nonce válido encontrado. Solicitando nova transação...")
+                        break
 
             elif response == "W":
                 # Não há transações disponíveis no momento
                 print("Nenhuma transação disponível. Aguardando 10 segundos...")
                 time.sleep(10)  # Aguardar 10 segundos antes de tentar novamente
+
+            elif response.startswith("I"):
+                # Mensagem I: Nonce encontrado por outro cliente
+                print("Nonce encontrado por outro cliente. Parando a mineração...")
+                break  # Sair do loop de mineração e solicitar nova transação
 
             else:
                 # Mensagem desconhecida
