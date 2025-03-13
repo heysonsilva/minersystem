@@ -86,7 +86,8 @@ def client_main():
                         print("Nonce validado com sucesso!")
                     elif resposta == b'R':
                         print("Nonce inválido, continue a mineração...")
-                    # Solicita nova transação após o processamento da resposta
+                    
+                    # Após processar a resposta, solicita nova transação
                     enviar_mensagem_G(sock, client_name)
                 else:
                     print("Nenhum nonce encontrado na janela. Solicitando nova transação...")
@@ -95,6 +96,14 @@ def client_main():
             elif tipo == b'W':
                 print("Nenhuma transação disponível. Aguardando 10 segundos...")
                 time.sleep(10)
+                enviar_mensagem_G(sock, client_name)
+            
+            elif tipo == b'I':
+                # Mensagem de Interrupção: a transação foi validada por outro cliente
+                trans_id_bytes = sock.recv(2)
+                trans_id = int.from_bytes(trans_id_bytes, 'big')
+                print(f"Transação {trans_id} validada por outro cliente. Interrompendo mineração atual.")
+                # Solicita nova transação
                 enviar_mensagem_G(sock, client_name)
             
             elif tipo == b'Q':
@@ -109,6 +118,7 @@ def client_main():
     
     sock.close()
     print("Conexão encerrada.")
+
 
 if __name__ == "__main__":
     client_main()
