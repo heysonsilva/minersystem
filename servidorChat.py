@@ -2,26 +2,23 @@ import socket
 import threading
 import time
 import hashlib
+import requests
 
-# Configuração do servidor
-HOST = '0.0.0.0'       # IP do servidor
-PORTA = 31471          # Porta do servidor
-TIMEOUT = 60           # Tempo limite para desconectar cliente inativo (60 segundos)
-encerrar_servidor = False  # Variável de controle do servidor
-tam_janela = 1000000    # Tamanho da janela de validação
+# Configurações do servidor
+HOST = '0.0.0.0'
+PORTA = 31471
+TIMEOUT = 60
+tam_janela = 1000000
 
-# Variáveis globais para gerenciamento
-pending_transactions = []      # Lista de tuplas: (transacao, bits_zero)
-validated_transactions = []    # Lista de tuplas: (transacao, nonce, nome_cliente)
-next_transacao_id = 1          # ID incremental para cada nova transação
-connected_clients = {}         # Dict: nome_cliente -> (conn, addr)
-
+# Variáveis globais
+encerrar_servidor = False
+pending_transactions = []      # Cada elemento: (transacao, bits_zero, client_counter, client_list)
+validated_transactions = []    # Cada elemento: (transacao, nonce, nome_cliente)
+next_transacao_id = 1
+connected_clients = {}         # Cada elemento: nome -> {conn, addr, current_transaction, window, connection_time, last_tx_sent}
 
 # Funções de comunicação binária
-
 def enviar_mensagem_T(sock, num_transacao, num_cliente, tam_janela, bits_zero, transacao):
-    # 'T' + numTransação (2 bytes) + numCliente (2 bytes) + tamJanela (4 bytes) +
-    # bitsZero (1 byte) + tamTransação (4 bytes) + transacao (n bytes)
     transacao_bytes = transacao.encode('utf-8')
     tam_transacao = len(transacao_bytes)
     mensagem = (
@@ -36,7 +33,6 @@ def enviar_mensagem_T(sock, num_transacao, num_cliente, tam_janela, bits_zero, t
     sock.sendall(mensagem)
 
 def ler_mensagem_S(sock):
-    # Lê os 6 bytes após o tipo 'S': numTransação (2 bytes) + nonce (4 bytes)
     dados = sock.recv(6)
     if len(dados) < 6:
         raise ValueError("Mensagem S incompleta")
@@ -50,13 +46,13 @@ def validar_nonce(nonce, transacao, bits_zero):
     target = 1 << (256 - bits_zero)
     return hash_int < target
 
-
 def enviar_encerramento(sock):
     try:
         sock.sendall(b'Q')
     except:
         pass
 
+# Função para tratar clientes conectados
 def client_handler(conn, addr):
     global next_transacao_id, pending_transactions, validated_transactions, connected_clients, tam_janela
     conn.settimeout(TIMEOUT)
@@ -72,7 +68,6 @@ def client_handler(conn, addr):
                 continue
 
             if header == b'G':
-                # Lê os 10 bytes seguintes para o nome
                 nome_bytes = b''
                 while len(nome_bytes) < 10:
                     chunk = conn.recv(10 - len(nome_bytes))
@@ -81,26 +76,28 @@ def client_handler(conn, addr):
                     nome_bytes += chunk
                 if nome is None:
                     nome = nome_bytes.decode('utf-8').strip()
-                    # Armazena dados adicionais do cliente em um dicionário
-                    connected_clients[nome] = {"conn": conn, "addr": addr, "current_transaction": None, "window": None}
+                    connected_clients[nome] = {
+                        "conn": conn,
+                        "addr": addr,
+                        "current_transaction": None,
+                        "window": None,
+                        "connection_time": time.time(),
+                        "last_tx_sent": None
+                    }
                     print(f"Cliente '{nome}' conectado de {addr}.")
-                # Se houver transações pendentes, envia a primeira; senão, envia 'W'
                 if pending_transactions:
-                    # pending_transactions[0] agora é uma tupla: (transacao, bits_zero, client_counter, client_list)
                     transacao, bits_zero, client_counter, client_list = pending_transactions[0]
-                    num_cliente = client_counter  # Define o número do cliente atual
-                    # Adiciona o nome do cliente à lista, se ainda não estiver presente
+                    num_cliente = client_counter
                     if nome not in client_list:
                         client_list.append(nome)
                     enviar_mensagem_T(conn, next_transacao_id, num_cliente, tam_janela, bits_zero, transacao)
-                    # Atualiza a transação pendente com o novo contador e lista atualizada
                     pending_transactions[0] = (transacao, bits_zero, client_counter + 1, client_list)
                     
-                    # Registra no cliente a transação que está minerando e o intervalo (janela) atribuído
                     window_start = num_cliente * tam_janela
                     window_end = window_start + tam_janela
                     connected_clients[nome]["current_transaction"] = (next_transacao_id, transacao)
                     connected_clients[nome]["window"] = (window_start, window_end)
+                    connected_clients[nome]["last_tx_sent"] = time.time()
                 else:
                     conn.sendall(b'W')
             
@@ -114,10 +111,7 @@ def client_handler(conn, addr):
                         print(f"Nonce {nonce} validado para a transação {num_trans}.")
                         validated_transactions.append((transacao, nonce, nome))
                         
-                        # Guarda o ID da transação validada antes de incrementá-lo
                         validated_trans_id = next_transacao_id
-                        
-                        # Notifica os outros clientes (mensagem I)
                         msg_I = b'I' + validated_trans_id.to_bytes(2, 'big')
                         for client_nome, dados in connected_clients.items():
                             if client_nome != nome:
@@ -141,7 +135,11 @@ def client_handler(conn, addr):
             else:
                 print("Mensagem desconhecida recebida do cliente.")
     except Exception as e:
-        print(f"Erro com cliente {addr}: {e}")
+        # Se o erro for do tipo WinError 10038, indica que o socket já está fechado
+        if "10038" in str(e):
+            print(f"Cliente '{nome}' desconectado por inatividade (sem transações por 60 segundos).")
+        else:
+            print(f"Erro com cliente {addr}: {e}")
     finally:
         conn.close()
         if nome and nome in connected_clients:
@@ -149,13 +147,13 @@ def client_handler(conn, addr):
         print(f"Conexão com {addr} encerrada.")
 
 
+# Função para tratamento dos comandos de entrada do usuário no servidor
 def user_input_thread():
     global pending_transactions, validated_transactions, connected_clients, encerrar_servidor
     while True:
         cmd = input("Digite um comando (/newtrans, /validtrans, /pendtrans, /clients, /exit): ").strip()
         if cmd.startswith("/newtrans"):
             try:
-                # Exemplo de comando: /newtrans Meu Texto Com Espaços 4
                 command_content = cmd[len("/newtrans "):]
                 last_space_index = command_content.rfind(" ")
                 if last_space_index == -1:
@@ -163,7 +161,6 @@ def user_input_thread():
                 transacao = command_content[:last_space_index]
                 bits_str = command_content[last_space_index+1:]
                 bits_zero = int(bits_str)
-                # Armazena a transação com contador de clientes iniciando em 0 e lista de clientes vazia
                 pending_transactions.append((transacao, bits_zero, 0, []))
                 print("Transação adicionada com sucesso!")
             except Exception as e:
@@ -205,14 +202,116 @@ def user_input_thread():
         else:
             print("Comando desconhecido.")
 
+# Função para monitorar timeouts dos clientes (60 segundos sem receber transação T)
+def monitor_client_timeouts():
+    global connected_clients, encerrar_servidor
+    while not encerrar_servidor:
+        time.sleep(5)
+        now = time.time()
+        for nome in list(connected_clients.keys()):
+            dados = connected_clients[nome]
+            last_tx = dados.get("last_tx_sent")
+            if last_tx is None:
+                last_tx = dados.get("connection_time", now)
+            if now - last_tx > 60:
+                print(f"Cliente '{nome}' não recebeu transações por mais de 60 segundos. Desconectando...")
+                try:
+                    enviar_encerramento(dados["conn"])
+                    dados["conn"].close()
+                except Exception as e:
+                    if "10038" in str(e):
+                        print(f"Cliente '{nome}' desconectado por inatividade (sem transações por 60 segundos).")
+                    else:
+                        print(f"Erro ao desconectar cliente '{nome}': {e}")
+                del connected_clients[nome]
 
+
+# Funções para integração com o Telegram via requests
+TELEGRAM_API_URL = "https://api.telegram.org/bot6083297671:AAEx6pVBTfsLZ0-Kqq048eVqaLQKgi8sVW4"
+BOT_NAME = "mecLove_bot"
+
+def send_message(chat_id, text):
+    url = TELEGRAM_API_URL + "/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    try:
+        requests.post(url, data=payload)
+    except Exception as e:
+        print(f"Erro ao enviar mensagem para o Telegram: {e}")
+
+def get_validtrans_text():
+    if validated_transactions:
+        lines = ["Transações validadas:"]
+        for t, nonce, cliente in validated_transactions:
+            lines.append(f"Transação: {t}, Nonce: {nonce}, Validado por: {cliente}")
+        return "\n".join(lines)
+    else:
+        return "Nenhuma transação validada ainda."
+
+def get_pendtrans_text():
+    if pending_transactions:
+        lines = ["Transações pendentes:"]
+        for t, bits, contador, client_list in pending_transactions:
+            clientes = ", ".join(client_list) if client_list else "Nenhum"
+            lines.append(f"Transação: {t}, Bits zero: {bits}, Clientes minerando: {clientes}")
+        return "\n".join(lines)
+    else:
+        return "Nenhuma transação pendente."
+
+def get_clients_text():
+    if connected_clients:
+        lines = ["Clientes conectados:"]
+        for nome, dados in connected_clients.items():
+            if dados["current_transaction"]:
+                trans_id, transacao = dados["current_transaction"]
+                window = dados["window"]
+                lines.append(f"Cliente: {nome}, Transação: {transacao}, Janela: {window[0]} a {window[1]-1}")
+            else:
+                lines.append(f"Cliente: {nome}, Sem transação atribuída")
+        return "\n".join(lines)
+    else:
+        return "Nenhum cliente conectado."
+
+def telegram_bot_thread():
+    offset = None
+    while not encerrar_servidor:
+        params = {}
+        if offset is not None:
+            params["offset"] = offset
+        try:
+            response = requests.get(TELEGRAM_API_URL + "/getUpdates", params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    for update in data.get("result", []):
+                        offset = update["update_id"] + 1
+                        if "message" in update and "text" in update["message"]:
+                            chat_id = update["message"]["chat"]["id"]
+                            text = update["message"]["text"].strip()
+                            if text == "/validtrans":
+                                send_message(chat_id, get_validtrans_text())
+                            elif text == "/pendtrans":
+                                send_message(chat_id, get_pendtrans_text())
+                            elif text == "/clients":
+                                send_message(chat_id, get_clients_text())
+                            else:
+                                send_message(chat_id, "Comando desconhecido. Comandos disponíveis: /validtrans, /pendtrans, /clients")
+            else:
+                print("Erro ao obter atualizações do Telegram:", response.status_code)
+        except Exception as e:
+            print("Erro no telegram_bot_thread:", e)
+        time.sleep(3)
+
+# Função principal do servidor
 def server_main():
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.bind((HOST, PORTA))
     server_sock.listen(5)
     print(f"Servidor escutando em {HOST}:{PORTA}")
     
+    # Inicia threads auxiliares
     threading.Thread(target=user_input_thread, daemon=True).start()
+    threading.Thread(target=monitor_client_timeouts, daemon=True).start()
+    threading.Thread(target=telegram_bot_thread, daemon=True).start()
     
     while not encerrar_servidor:
         try:
