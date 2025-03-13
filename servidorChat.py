@@ -16,6 +16,7 @@ validated_transactions = []    # Lista de tuplas: (transacao, nonce, nome_client
 next_transacao_id = 1          # ID incremental para cada nova transação
 connected_clients = {}         # Dict: nome_cliente -> (conn, addr)
 
+
 # Funções de comunicação binária
 
 def enviar_mensagem_T(sock, num_transacao, num_cliente, tam_janela, bits_zero, transacao):
@@ -57,7 +58,7 @@ def enviar_encerramento(sock):
         pass
 
 def client_handler(conn, addr):
-    global next_transacao_id, pending_transactions, validated_transactions, connected_clients
+    global next_transacao_id, pending_transactions, validated_transactions, connected_clients, tam_janela
     conn.settimeout(TIMEOUT)
     nome = None
     try:
@@ -71,7 +72,7 @@ def client_handler(conn, addr):
                 continue
 
             if header == b'G':
-                # Para 'G', leia os 10 bytes seguintes para o nome
+                # Lê os 10 bytes seguintes para o nome
                 nome_bytes = b''
                 while len(nome_bytes) < 10:
                     chunk = conn.recv(10 - len(nome_bytes))
@@ -80,40 +81,48 @@ def client_handler(conn, addr):
                     nome_bytes += chunk
                 if nome is None:
                     nome = nome_bytes.decode('utf-8').strip()
-                    connected_clients[nome] = (conn, addr)
+                    # Armazena dados adicionais do cliente em um dicionário
+                    connected_clients[nome] = {"conn": conn, "addr": addr, "current_transaction": None, "window": None}
                     print(f"Cliente '{nome}' conectado de {addr}.")
                 # Se houver transações pendentes, envia a primeira; senão, envia 'W'
                 if pending_transactions:
-                    # pending_transactions[0] é uma tupla: (transacao, bits_zero, client_counter)
-                    transacao, bits_zero, client_counter = pending_transactions[0]
+                    # pending_transactions[0] agora é uma tupla: (transacao, bits_zero, client_counter, client_list)
+                    transacao, bits_zero, client_counter, client_list = pending_transactions[0]
                     num_cliente = client_counter  # Define o número do cliente atual
+                    # Adiciona o nome do cliente à lista, se ainda não estiver presente
+                    if nome not in client_list:
+                        client_list.append(nome)
                     enviar_mensagem_T(conn, next_transacao_id, num_cliente, tam_janela, bits_zero, transacao)
-                    print(f"Enviando transação {next_transacao_id} para {nome} com cliente número {num_cliente}.")
-                    # Incrementa o contador para a próxima requisição deste mesmo processo
-                    pending_transactions[0] = (transacao, bits_zero, client_counter + 1)
+                    # Atualiza a transação pendente com o novo contador e lista atualizada
+                    pending_transactions[0] = (transacao, bits_zero, client_counter + 1, client_list)
+                    
+                    # Registra no cliente a transação que está minerando e o intervalo (janela) atribuído
+                    window_start = num_cliente * tam_janela
+                    window_end = window_start + tam_janela
+                    connected_clients[nome]["current_transaction"] = (next_transacao_id, transacao)
+                    connected_clients[nome]["window"] = (window_start, window_end)
                 else:
                     conn.sendall(b'W')
-
+            
             elif header == b'S':
                 num_trans, nonce = ler_mensagem_S(conn)
                 print(f"Cliente '{nome}' enviou nonce {nonce} para a transação {num_trans}.")
                 if pending_transactions:
-                    transacao, bits_zero, _ = pending_transactions[0]
+                    transacao, bits_zero, _, _ = pending_transactions[0]
                     if validar_nonce(nonce, transacao, bits_zero):
                         conn.sendall(b'V')
                         print(f"Nonce {nonce} validado para a transação {num_trans}.")
                         validated_transactions.append((transacao, nonce, nome))
                         
-                        # Guarda o id da transação validada antes de incrementá-lo
+                        # Guarda o ID da transação validada antes de incrementá-lo
                         validated_trans_id = next_transacao_id
                         
-                        # Envia mensagem "I" (para Interromper) para todos os outros clientes
-                        # Formato: 'I' + numTransação (2 bytes)
+                        # Notifica os outros clientes (mensagem I)
                         msg_I = b'I' + validated_trans_id.to_bytes(2, 'big')
-                        for client_nome, (client_conn, _) in connected_clients.items():
-                            if client_nome != nome:  # Não envia para o cliente que encontrou o nonce
+                        for client_nome, dados in connected_clients.items():
+                            if client_nome != nome:
                                 try:
-                                    client_conn.sendall(msg_I)
+                                    dados["conn"].sendall(msg_I)
                                 except Exception as e:
                                     print(f"Erro ao enviar mensagem I para {client_nome}: {e}")
                         
@@ -124,6 +133,11 @@ def client_handler(conn, addr):
                         print(f"Nonce {nonce} inválido para a transação {num_trans}.")
                 else:
                     conn.sendall(b'W')
+            
+            elif header == b'Q':
+                print("Servidor solicitou encerramento. Encerrando...")
+                break
+            
             else:
                 print("Mensagem desconhecida recebida do cliente.")
     except Exception as e:
@@ -134,13 +148,14 @@ def client_handler(conn, addr):
             del connected_clients[nome]
         print(f"Conexão com {addr} encerrada.")
 
+
 def user_input_thread():
     global pending_transactions, validated_transactions, connected_clients, encerrar_servidor
     while True:
         cmd = input("Digite um comando (/newtrans, /validtrans, /pendtrans, /clients, /exit): ").strip()
         if cmd.startswith("/newtrans"):
             try:
-                # Exemplo: /newtrans Meu Texto Com Espaços 4
+                # Exemplo de comando: /newtrans Meu Texto Com Espaços 4
                 command_content = cmd[len("/newtrans "):]
                 last_space_index = command_content.rfind(" ")
                 if last_space_index == -1:
@@ -148,8 +163,8 @@ def user_input_thread():
                 transacao = command_content[:last_space_index]
                 bits_str = command_content[last_space_index+1:]
                 bits_zero = int(bits_str)
-                # Armazena a transação com contador de clientes iniciando em 0
-                pending_transactions.append((transacao, bits_zero, 0))
+                # Armazena a transação com contador de clientes iniciando em 0 e lista de clientes vazia
+                pending_transactions.append((transacao, bits_zero, 0, []))
                 print("Transação adicionada com sucesso!")
             except Exception as e:
                 print("Formato inválido. Exemplo: /newtrans Meu Texto Com Espaços 4")
@@ -163,22 +178,28 @@ def user_input_thread():
         elif cmd == "/pendtrans":
             if pending_transactions:
                 print("Transações pendentes:")
-                for t, bits, contador in pending_transactions:
-                    print(f"Transação: {t}, Bits zero: {bits}, Clientes já minerando: {contador}")
+                for t, bits, contador, client_list in pending_transactions:
+                    clientes = ", ".join(client_list) if client_list else "Nenhum"
+                    print(f"Transação: {t}, Bits zero: {bits}, Clientes minerando: {clientes}")
             else:
                 print("Nenhuma transação pendente.")
         elif cmd == "/clients":
             if connected_clients:
                 print("Clientes conectados:")
-                for nome, (_, addr) in connected_clients.items():
-                    print(f"Cliente: {nome}, Endereço: {addr}")
+                for nome, dados in connected_clients.items():
+                    if dados["current_transaction"]:
+                        trans_id, transacao = dados["current_transaction"]
+                        window = dados["window"]
+                        print(f"Cliente: {nome}, Transação: {transacao}, Janela: {window[0]} a {window[1]-1}")
+                    else:
+                        print(f"Cliente: {nome}, Sem transação atribuída")
             else:
                 print("Nenhum cliente conectado.")
         elif cmd == "/exit":
             print("Encerrando servidor e notificando clientes...")
-            for nome, (conn, _) in list(connected_clients.items()):
-                enviar_encerramento(conn)
-                conn.close()
+            for nome, dados in list(connected_clients.items()):
+                enviar_encerramento(dados["conn"])
+                dados["conn"].close()
             encerrar_servidor = True
             break
         else:
