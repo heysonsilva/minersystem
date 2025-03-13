@@ -84,7 +84,7 @@ def client_handler(conn, addr):
                     print(f"Cliente '{nome}' conectado de {addr}.")
                 # Se houver transações pendentes, envia a primeira; senão, envia 'W'
                 if pending_transactions:
-                    # pending_transactions[0] é (transacao, bits_zero, client_counter)
+                    # pending_transactions[0] é uma tupla: (transacao, bits_zero, client_counter)
                     transacao, bits_zero, client_counter = pending_transactions[0]
                     num_cliente = client_counter  # Define o número do cliente atual
                     enviar_mensagem_T(conn, next_transacao_id, num_cliente, tam_janela, bits_zero, transacao)
@@ -103,6 +103,20 @@ def client_handler(conn, addr):
                         conn.sendall(b'V')
                         print(f"Nonce {nonce} validado para a transação {num_trans}.")
                         validated_transactions.append((transacao, nonce, nome))
+                        
+                        # Guarda o id da transação validada antes de incrementá-lo
+                        validated_trans_id = next_transacao_id
+                        
+                        # Envia mensagem "I" (para Interromper) para todos os outros clientes
+                        # Formato: 'I' + numTransação (2 bytes)
+                        msg_I = b'I' + validated_trans_id.to_bytes(2, 'big')
+                        for client_nome, (client_conn, _) in connected_clients.items():
+                            if client_nome != nome:  # Não envia para o cliente que encontrou o nonce
+                                try:
+                                    client_conn.sendall(msg_I)
+                                except Exception as e:
+                                    print(f"Erro ao enviar mensagem I para {client_nome}: {e}")
+                        
                         pending_transactions.pop(0)
                         next_transacao_id += 1
                     else:
