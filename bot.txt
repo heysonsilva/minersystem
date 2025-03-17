@@ -6,4 +6,4 @@ NOME DO BOT: ++++
 
 ID do CHAT GROUP: +++++
 
-ENDPOINT DO TELEGRAM: https://api.telegram.org/bot<api token>/
+ENDPOINT DO TELEGRAM: https://api.telegram.org/bot<api token>
